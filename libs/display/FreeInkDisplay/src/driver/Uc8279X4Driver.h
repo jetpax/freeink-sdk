@@ -73,6 +73,15 @@ class Uc8279X4Driver : public PanelDriver {
   PanelGeometry geometry() const override;
 
   void setReaderRefresh(bool reading) override { _readerRefresh = reading; }
+  // Host waveform tables for the Fast black-and-white refresh: five 42-byte
+  // tables, for registers 0x20 to 0x24 in that order (VCOM, then the four
+  // transitions). Borrowed, not copied; null, or enabled false, is the panel's
+  // own waveform again. Only the Fast B/W refresh uses them: the clearing
+  // refreshes and the grayscale passes keep theirs.
+  void setCustomLut(EpdBus& bus, bool enabled, const unsigned char* data) override {
+    (void)bus;
+    _customLut = enabled ? data : nullptr;
+  }
   void begin(EpdBus& bus) override;
   void deepSleep(EpdBus& bus) override;
 
@@ -126,6 +135,7 @@ class Uc8279X4Driver : public PanelDriver {
  private:
   X4ProTextAa _textAa;
   bool _readerRefresh = false;
+  const unsigned char* _customLut = nullptr;
   void initController(EpdBus& bus);
   void startBwRefresh(EpdBus& bus, bool fast);
   // Stream a framebuffer into a RAM plane: 0xFF padding for gates before the
