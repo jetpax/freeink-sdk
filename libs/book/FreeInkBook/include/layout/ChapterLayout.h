@@ -49,6 +49,14 @@ struct LayoutParams {
   bool focusReading = false;                     // bold each word's first ~45% (fixation aid)
   const CssStylesheet* stylesheet = nullptr;     // book CSS (optional)
   const Hyphenator* hyphenator = nullptr;        // soft hyphenation (optional)
+
+  // Begin pages at a place deep in the chapter instead of at its start: the
+  // paragraphs that end at or before this chapter character offset are only
+  // counted, never measured, broken or placed, and their images are passed
+  // over, so reaching the place costs the parse alone. The first page then
+  // starts with the paragraph holding it. Pages carry their true charStart;
+  // their pageIndex counts from that first page. 0 lays out the whole chapter.
+  uint32_t startChar = 0;
 };
 
 // One horizontal run of same-styled text. `text` points into layout scratch

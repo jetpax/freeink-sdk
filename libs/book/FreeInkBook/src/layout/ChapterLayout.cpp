@@ -726,6 +726,7 @@ class LayoutEngine : public XmlHandler {
     }
     pageArena_.init(pageBlock, kPageArenaCap);
     pageY_ = params_.marginTop;
+    skipUntil_ = params_.startChar;
 
     ElemState root;
     root.sizePct = 100;
@@ -1107,6 +1108,7 @@ class LayoutEngine : public XmlHandler {
   // --- images ----------------------------------------------------------------
 
   void placeImage(const char* src) {
+    if (skipUntil_ > 0) return;  // before the place pages begin at
     const size_t marked = scratch_.mark();
     const char* resolved =
         zip_ != nullptr ? resolveHref(scratch_, chapterDir_, src, nullptr) : nullptr;
@@ -1439,6 +1441,20 @@ class LayoutEngine : public XmlHandler {
     if (parLen_ == 0) {
       continued_ = false;
       return;
+    }
+    if (skipUntil_ > 0) {
+      // Before the place pages begin at (LayoutParams::startChar): counted only
+      const uint32_t end = parCharBase_ + countChars(parText_, parLen_);
+      if (end <= skipUntil_) {
+        parCharBase_ = end;
+        parLen_ = 0;
+        spanCount_ = 0;
+        pendingMarginRootPct_ = 0;
+        pendingSpace_ = false;
+        continued_ = false;
+        return;
+      }
+      skipUntil_ = 0;  // this paragraph holds it: pages begin here
     }
     const uint16_t sizePx = paragraphSizePx();
     // One line height for the whole paragraph, from the paragraph font size.
@@ -1792,6 +1808,7 @@ class LayoutEngine : public XmlHandler {
   Arena pageArena_;
 
   uint32_t parLen_ = 0;
+  uint32_t skipUntil_ = 0;  // LayoutParams::startChar, until the paragraph holding it
   uint16_t spanCount_ = 0;
   uint32_t pendingMarginRootPct_ = 0;
   uint32_t lineCount_ = 0;
