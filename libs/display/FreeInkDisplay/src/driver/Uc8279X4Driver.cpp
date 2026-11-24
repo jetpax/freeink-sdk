@@ -507,9 +507,24 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
     bus.data(static_cast<uint8_t>(yEnd & 0xFF));
     bus.data(0x01);
   }
-  bus.cmd(CMD_PANEL_SETTING);
-  bus.data(static_cast<uint8_t>(_cfg.psr0 & 0xDF));  // REG cleared -> OTP (0x13)
-  bus.data(_cfg.psr1);
+  if (fast && _customLut != nullptr) {
+    // A caller's waveform (setCustomLut): REG set, so the panel runs the five
+    // tables uploaded here in place of its own. PON reloaded the panel's
+    // settings, so these go in after it, as for the AA path.
+    bus.cmd(CMD_PLL);
+    bus.data(_cfg.pll);
+    bus.cmd(CMD_PANEL_SETTING);
+    bus.data(_cfg.psr0);  // REG=1 -> external LUT
+    bus.data(_cfg.psr1);
+    for (uint8_t t = 0; t < 5; t++) {
+      bus.cmd(static_cast<uint8_t>(0x20 + t));
+      for (uint8_t i = 0; i < 42; i++) bus.data(_customLut[t * 42 + i]);
+    }
+  } else {
+    bus.cmd(CMD_PANEL_SETTING);
+    bus.data(static_cast<uint8_t>(_cfg.psr0 & 0xDF));  // REG cleared -> OTP (0x13)
+    bus.data(_cfg.psr1);
+  }
   bus.cmd(CMD_DISPLAY_REFRESH);
   // Confirm the waveform started (BUSY dropped) before returning, so
   // displayFinish() only rides out the completion edge.
