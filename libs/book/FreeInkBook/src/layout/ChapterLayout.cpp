@@ -1232,9 +1232,20 @@ class LayoutEngine : public XmlHandler {
     return params_.focusReading && (levels_[pos] & kFocusBold) ? StyleBold : StyleNone;
   }
 
+  // Characters that only steer breaking or joining and have no glyph of their own:
+  // zero-width space, non-joiner and joiner, word joiner and the invisible math
+  // operators, the Mongolian vowel separator, and the zero-width no-break space
+  // (BOM). Standard Ebooks puts a word joiner before every em dash; a font without
+  // it would draw a missing-glyph box.
+  static bool isZeroWidthFormat(uint32_t cp) {
+    return (cp >= 0x200B && cp <= 0x200D) || (cp >= 0x2060 && cp <= 0x2064) || cp == 0xFEFF ||
+           cp == 0x180E;
+  }
+
   int32_t advanceFor(uint32_t cp, uint32_t prevCp, const Span& span,
                      uint8_t extraFlags = 0) const {
     if (cp == '\n' || cp == 0xAD) return 0;  // soft hyphen: invisible until a break uses it
+    if (isZeroWidthFormat(cp)) return 0;    // a word joiner and the like: never drawn
     const uint16_t sizePx = spanSizePx(span);
     const uint8_t flags = static_cast<uint8_t>(span.flags | extraFlags);
     int32_t adv = params_.font->advance(cp, sizePx, flags);
@@ -1740,7 +1751,7 @@ class LayoutEngine : public XmlHandler {
     uint32_t ci = sg.start;
     while (ci < sg.end) {
       uint32_t cp2 = decodeShaped(sg.end, ci, *sg.span);
-      if (cp2 == 0xAD) continue;
+      if (cp2 == 0xAD || isZeroWidthFormat(cp2)) continue;
       if (sg.level & 1) cp2 = bidiMirror(cp2);
       outLen += encodeUtf8(cp2, copy + outLen);
     }
