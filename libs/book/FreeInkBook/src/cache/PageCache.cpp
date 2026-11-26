@@ -10,7 +10,7 @@ namespace book {
 
 namespace {
 
-constexpr uint16_t kFormatVersion = 4;  // v4: zero-width format chars dropped from stored text
+constexpr uint16_t kFormatVersion = 5;  // v5: text measured and placed in 64ths of a pixel (Pen.h)
 constexpr uint32_t kHeaderSize = 12;
 constexpr uint32_t kFooterSize = 24;  // v3: + anchors + totalChars
 // Partial (suspended-build) footer: the final footer's five u32 fields plus

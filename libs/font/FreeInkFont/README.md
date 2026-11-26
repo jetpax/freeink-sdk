@@ -15,6 +15,12 @@ the first FreeType-backed operation.
 - **`freeink::font::Font`** — metrics only: `advance()`, `lineHeight()`,
   `ascent()`, `kerning()`, `ligature()`, `covers()`. A layout pass can run
   host-side against this with no font files at all.
+  `advance26_6()` and `kerning26_6()` give the same in 64ths of a pixel, as the
+  font has them before rounding (whole pixels × 64 by default).
+- **`freeink::font::Pen`** (`Pen.h`) — where the letters of a line go: the pen
+  kept in 64ths, each letter at the whole pixel nearest it, so rounding doesn't
+  add up along a word. The book's layout measures, and `PageRenderer` draws, by
+  the same values; a host drawing UI text should place it with a `Pen` too.
 - **`freeink::font::RasterFont : Font`** — adds `hasGlyph()` and
   `rasterize(codepoint, sizePx) → const GlyphBitmap*` (8-bit coverage +
   bearings + advance).

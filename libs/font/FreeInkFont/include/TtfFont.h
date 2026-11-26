@@ -57,6 +57,9 @@ class TtfFont : public RasterFont {
   int16_t ascent(uint16_t sizePx) override;
   int16_t kerning(uint32_t left, uint32_t right, uint16_t sizePx,
                   uint8_t styleFlags) override;
+  int32_t advance26_6(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags) override;
+  int32_t kerning26_6(uint32_t left, uint32_t right, uint16_t sizePx,
+                      uint8_t styleFlags) override;
 
   // Standard Latin ligatures (fi fl ff ffi ffl) when the face carries the
   // Unicode ligature glyphs. (stb_truetype exposes no GSUB, so discretionary
@@ -128,6 +131,9 @@ class FontChain : public Font {
   int16_t ascent(uint16_t sizePx) override;
   int16_t kerning(uint32_t left, uint32_t right, uint16_t sizePx,
                   uint8_t styleFlags) override;
+  int32_t advance26_6(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags) override;
+  int32_t kerning26_6(uint32_t left, uint32_t right, uint16_t sizePx,
+                      uint8_t styleFlags) override;
 
   uint32_t ligature(uint32_t left, uint32_t right, uint8_t styleFlags) override;
   bool covers(uint32_t codepoint) override;

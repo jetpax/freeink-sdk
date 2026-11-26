@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include <linebreak.h>
+#include <Pen.h>
 
 #include "epub/ImageProbe.h"
 #include "epub/PackageParsers.h"
@@ -916,7 +917,7 @@ class LayoutEngine : public XmlHandler {
   struct LineRec {
     uint32_t start;
     uint32_t end;
-    int32_t naturalWidth;  // includes the hyphen when kLineHyphen is set
+    int32_t naturalWidth;  // in 64ths of a pixel; includes the hyphen when kLineHyphen is set
     uint16_t spaceCount;   // adjustable spaces (Latin justification)
     uint16_t cjkGaps;      // CJ boundaries (inter-character justification)
     uint16_t hangulGaps;   // Hangul boundaries — stretch only on space-less lines
@@ -1242,22 +1243,33 @@ class LayoutEngine : public XmlHandler {
            cp == 0x180E;
   }
 
+  // Widths here are in 64ths of a pixel (26.6), as the letters are placed when they are drawn
+  // (Pen.h): a word is as wide as it is measured. They become whole pixels only where a run is
+  // put on the page (emitSeg), and where a line's room is shared out (emitLine).
+  static int32_t fine(int32_t px) { return px * 64; }
+
+  // The advance of cp after prevCp, in 64ths of a pixel.
   int32_t advanceFor(uint32_t cp, uint32_t prevCp, const Span& span,
                      uint8_t extraFlags = 0) const {
     if (cp == '\n' || cp == 0xAD) return 0;  // soft hyphen: invisible until a break uses it
     if (isZeroWidthFormat(cp)) return 0;    // a word joiner and the like: never drawn
     const uint16_t sizePx = spanSizePx(span);
     const uint8_t flags = static_cast<uint8_t>(span.flags | extraFlags);
-    int32_t adv = params_.font->advance(cp, sizePx, flags);
+    int32_t adv = params_.font->advance26_6(cp, sizePx, flags);
     if (prevCp != 0) {
-      adv += params_.font->kerning(prevCp, cp, sizePx, flags);
-      if (crossesScripts(prevCp, cp)) adv += sizePx / 4;
-      adv += cjkCompression(prevCp, cp, sizePx);
+      adv += params_.font->kerning26_6(prevCp, cp, sizePx, flags);
+      if (crossesScripts(prevCp, cp)) adv += fine(sizePx / 4);
+      adv += fine(cjkCompression(prevCp, cp, sizePx));
     }
     return adv;
   }
 
-  // Width of parText_[from..to) with kerning, resetting kerning at `from`.
+  // A hyphen's advance, in 64ths of a pixel.
+  int32_t hyphenFor(const Span& span, uint8_t flags) const {
+    return params_.font->advance26_6('-', spanSizePx(span), flags);
+  }
+
+  // Width of parText_[from..to) with kerning, resetting kerning at `from`, in 64ths of a pixel.
   int32_t measureRange(uint32_t from, uint32_t to) const {
     int32_t width = 0;
     uint32_t prev = 0;
@@ -1266,7 +1278,7 @@ class LayoutEngine : public XmlHandler {
       const uint32_t charStart = i;
       const Span& span = spanAt(charStart);
       if (charStart == span.start && span.marginBeforeRootPct > 0) {
-        width += marginBeforePx(span);
+        width += fine(marginBeforePx(span));
         prev = 0;
       }
       const uint32_t cp = decodeShaped(to, i, span);
@@ -1277,7 +1289,7 @@ class LayoutEngine : public XmlHandler {
   }
 
   // Attempts to hyphenate the word starting at `wordStart` so that a prefix
-  // (plus a hyphen) fits in `budget` measured from `lineStart`. Returns the
+  // (plus a hyphen) fits in `budget` (whole pixels) measured from `lineStart`. Returns the
   // byte split position, or 0 if hyphenation does not help.
   uint32_t tryHyphenBreak(uint32_t lineStart, uint32_t wordStart, int32_t budget) {
     if (params_.hyphenator == nullptr || !params_.hyphenator->ready()) return 0;
@@ -1300,13 +1312,12 @@ class LayoutEngine : public XmlHandler {
 
     const int32_t prefixWidth = measureRange(lineStart, wordStart);
     const Span& span = spanAt(wordStart);
-    const int32_t hyphenWidth =
-        params_.font->advance('-', spanSizePx(span), span.flags);
+    const int32_t hyphenWidth = hyphenFor(span, span.flags);
     for (int i = n - 1; i >= 0; --i) {
       const uint32_t split = wordStart + positions[i];
       if (split <= lineStart) continue;
       const int32_t width = prefixWidth + measureRange(wordStart, split) + hyphenWidth;
-      if (width <= budget) return split;
+      if (width <= fine(budget)) return split;
     }
     return 0;
   }
@@ -1361,12 +1372,12 @@ class LayoutEngine : public XmlHandler {
       const Span& shapeSpan = spanAt(charStart);
       const uint32_t cp = decodeShaped(parLen_, i, shapeSpan);
       const int32_t leadingMargin =
-          charStart == shapeSpan.start ? marginBeforePx(shapeSpan) : 0;
+          charStart == shapeSpan.start ? fine(marginBeforePx(shapeSpan)) : 0;
       const int32_t adv =
           leadingMargin + advanceFor(cp, leadingMargin > 0 ? 0 : prevCp, shapeSpan,
                                      focusExtra(charStart));
 
-      if (cp != '\n' && lineWidth + adv > maxWidth && charStart > lineStart) {
+      if (cp != '\n' && lineWidth + adv > fine(maxWidth) && charStart > lineStart) {
         // Try a hyphen inside the overflowing word first; it beats breaking
         // at the previous space when it fits meaningfully more text.
         uint32_t breakEnd = 0;
@@ -1442,7 +1453,7 @@ class LayoutEngine : public XmlHandler {
     rec.naturalWidth = measureRange(start, end);
     if (flags & kLineHyphen) {
       const Span& span = spanAt(end > start ? end - 1 : start);
-      rec.naturalWidth += params_.font->advance('-', spanSizePx(span), span.flags);
+      rec.naturalWidth += hyphenFor(span, span.flags);
     }
   }
 
@@ -1551,7 +1562,9 @@ class LayoutEngine : public XmlHandler {
             ? static_cast<int32_t>(sizePx) * para_.textIndentPct / 100
             : 0;
     const int32_t maxWidth = baseMaxWidth - textIndentPx;
-    const int32_t leftover = maxWidth - rec.naturalWidth;
+    // The room left on the line, in whole pixels, rounded down so a justified line never
+    // runs past its margin
+    const int32_t leftover = (fine(maxWidth) - rec.naturalWidth) >> 6;
 
     // Korean justifies at its word spaces; Hangul inter-syllable gaps only
     // stretch when the line has no spaces at all (space-less runs, or CJ).
@@ -1567,12 +1580,13 @@ class LayoutEngine : public XmlHandler {
       if (align == TextAlign::Left) align = TextAlign::Right;
       else if (align == TextAlign::Right) align = TextAlign::Left;
     }
-    int32_t x = params_.marginLeft + para_.indentPx +
-                (paraRtl_ ? 0 : textIndentPx);
+    // x, where the next run goes, in 64ths of a pixel
+    int32_t x = fine(params_.marginLeft + para_.indentPx +
+                     (paraRtl_ ? 0 : textIndentPx));
     if (align == TextAlign::Right) {
-      x += leftover + (paraRtl_ ? 0 : 0);
+      x += fine(leftover);
     } else if (align == TextAlign::Center) {
-      x += leftover / 2;
+      x += fine(leftover / 2);
     }
     const int32_t perGap = justify ? leftover / static_cast<int32_t>(gaps) : 0;
     int32_t gapRemainder = justify ? leftover % static_cast<int32_t>(gaps) : 0;
@@ -1685,21 +1699,21 @@ class LayoutEngine : public XmlHandler {
         const Seg& logicalOwner = sg;
         if (logicalOwner.gapBefore || logicalOwner.spaceBefore) {
           if (logicalOwner.spaceBefore) {
-            x += params_.font->advance(' ', spanSizePx(*logicalOwner.span),
-                                       logicalOwner.span->flags);
+            x += params_.font->advance26_6(' ', spanSizePx(*logicalOwner.span),
+                                           logicalOwner.span->flags);
           }
           if (justify) {
-            x += perGap;
-            if (gapRemainder > 0) { ++x; --gapRemainder; }
+            x += fine(perGap);
+            if (gapRemainder > 0) { x += fine(1); --gapRemainder; }
           }
         } else if (logicalOwner.scriptGap) {
-          x += spanSizePx(*logicalOwner.span) / 4;
+          x += fine(spanSizePx(*logicalOwner.span) / 4);
         } else if (logicalOwner.compressBefore) {
-          x -= spanSizePx(*logicalOwner.span) / 2;  // punctuation pair overlap
+          x -= fine(spanSizePx(*logicalOwner.span) / 2);  // punctuation pair overlap
         }
       }
       if (sg.start == sg.span->start && sg.span->marginBeforeRootPct > 0) {
-        x += marginBeforePx(*sg.span);
+        x += fine(marginBeforePx(*sg.span));
       }
       const bool lastLogical = sg.end == rec.end;
       const bool addHyphen = lastLogical && (rec.flags & kLineHyphen) != 0 && !paraRtl_;
@@ -1708,7 +1722,8 @@ class LayoutEngine : public XmlHandler {
     pageY_ += lineHeight;
   }
 
-  // Emits one segment as a page run at x (advancing it). Splits pages when
+  // Emits one segment as a page run at x (in 64ths of a pixel; advancing it). The run goes at
+  // the whole pixel nearest x, and is drawn from there as it was measured. Splits pages when
   // run/arena capacity is hit. Returns false on stop/failure.
   bool emitSeg(const Seg& sg, bool addHyphen, int16_t& baselineY, int32_t& x,
                uint16_t sizePx) {
@@ -1758,7 +1773,7 @@ class LayoutEngine : public XmlHandler {
     if ((sg.level & 1) && outLen > 1) reverseUtf8(copy, outLen);  // store visual order (L2)
     if (addHyphen) {
       copy[outLen++] = '-';
-      segWidth += params_.font->advance('-', spanSizePx(*sg.span), runFlags);
+      segWidth += hyphenFor(*sg.span, runFlags);
     }
     int16_t runBaseline = baselineY;
     if (sg.span->flags & StyleSuperscript) {
@@ -1768,7 +1783,7 @@ class LayoutEngine : public XmlHandler {
     }
     runs_[runCount_++] = {copy,
                           static_cast<uint16_t>(outLen),
-                          static_cast<int16_t>(x),
+                          static_cast<int16_t>(font::pixels26_6(x)),
                           runBaseline,
                           spanSizePx(*sg.span),
                           runFlags};
@@ -1778,9 +1793,10 @@ class LayoutEngine : public XmlHandler {
       PageLink& pl = links_[linkCount_++];
       pl.target = pageArena_.strdup(parLinkPath_[li]);
       pl.fragment = pageArena_.strdup(parLinkFrag_[li]);
-      pl.x = static_cast<int16_t>(x);
+      pl.x = static_cast<int16_t>(font::pixels26_6(x));
       pl.y = static_cast<int16_t>(runBaseline - sz);
-      pl.width = static_cast<uint16_t>(segWidth > 0 ? segWidth : 1);
+      const int32_t widthPx = font::pixels26_6(segWidth);
+      pl.width = static_cast<uint16_t>(widthPx > 0 ? widthPx : 1);
       pl.height = static_cast<uint16_t>(sz + sz / 4);
       if (pl.target == nullptr || pl.fragment == nullptr) --linkCount_;
     }

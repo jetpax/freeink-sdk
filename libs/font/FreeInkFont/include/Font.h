@@ -73,6 +73,18 @@ class Font {
     return 0;
   }
 
+  // The advance and the kerning as the font has them before rounding, in 64ths of a pixel
+  // (26.6). Text is placed by these: the pen kept in 64ths and each letter put at the whole
+  // pixel nearest it (Pen.h), so the rounding of each letter doesn't add up along a word and
+  // leave gaps in it. Layout measures by them too, so a word is as wide as it is drawn. A font
+  // with no finer metrics gives its whole pixels; these defaults do that.
+  virtual int32_t advance26_6(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags) {
+    return static_cast<int32_t>(advance(codepoint, sizePx, styleFlags)) * 64;
+  }
+  virtual int32_t kerning26_6(uint32_t left, uint32_t right, uint16_t sizePx, uint8_t styleFlags) {
+    return static_cast<int32_t>(kerning(left, right, sizePx, styleFlags)) * 64;
+  }
+
   // Whether the font can draw `codepoint` at all. Layout uses this to keep a
   // shaping substitution (Arabic presentation forms) only when the font has
   // the substituted glyph, falling back to the base letter otherwise. The

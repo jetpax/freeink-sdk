@@ -171,6 +171,8 @@ class FtFont : public RasterFont {
   int16_t lineHeight(uint16_t sizePx) override;
   int16_t ascent(uint16_t sizePx) override;
   int16_t kerning(uint32_t left, uint32_t right, uint16_t sizePx, uint8_t styleFlags) override;
+  int32_t advance26_6(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags) override;
+  int32_t kerning26_6(uint32_t left, uint32_t right, uint16_t sizePx, uint8_t styleFlags) override;
 
   // Standard Latin ligatures (fi fl ff ffi ffl), same coverage as TtfFont's,
   // but resolved via the face's actual GSUB 'liga'/'rlig' table (see Gsub.h)

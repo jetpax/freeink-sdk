@@ -118,6 +118,27 @@ int16_t TtfFont::kerning(uint32_t left, uint32_t right, uint16_t sizePx, uint8_t
   return static_cast<int16_t>(scaled + (scaled < 0 ? -0.5f : 0.5f));
 }
 
+int32_t TtfFont::advance26_6(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags) {
+  (void)styleFlags;
+  if (!ready_) return 0;
+  glyphIndexFor(codepoint);  // fills the slot
+  const AdvanceSlot& slot = advances_[codepoint % kAdvanceSlots];
+  return static_cast<int32_t>(slot.unscaledAdvance * scaleFor(sizePx) * 64.0f + 0.5f);
+}
+
+int32_t TtfFont::kerning26_6(uint32_t left, uint32_t right, uint16_t sizePx, uint8_t styleFlags) {
+  (void)styleFlags;
+  if (!ready_) return 0;
+  const int32_t g1 = glyphIndexFor(left);
+  const AdvanceSlot leftSlot = advances_[left % kAdvanceSlots];
+  const int32_t g2 = glyphIndexFor(right);
+  if (leftSlot.key != left || g1 == 0 || g2 == 0) return 0;
+  const int unscaled = stbtt_GetGlyphKernAdvance(fontOf(fontInfo_), g1, g2);
+  if (unscaled == 0) return 0;
+  const float scaled = unscaled * scaleFor(sizePx) * 64.0f;
+  return static_cast<int32_t>(scaled + (scaled < 0 ? -0.5f : 0.5f));
+}
+
 uint32_t TtfFont::ligature(uint32_t left, uint32_t right, uint8_t styleFlags) {
   (void)styleFlags;
   if (!ready_) return 0;
@@ -223,6 +244,11 @@ int16_t FontChain::advance(uint32_t codepoint, uint16_t sizePx, uint8_t styleFla
   return font != nullptr ? font->advance(codepoint, sizePx, styleFlags) : 0;
 }
 
+int32_t FontChain::advance26_6(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags) {
+  RasterFont* font = fontFor(codepoint, styleFlags);
+  return font != nullptr ? font->advance26_6(codepoint, sizePx, styleFlags) : 0;
+}
+
 int16_t FontChain::lineHeight(uint16_t sizePx) {
   return count_ > 0 ? entries_[0].font->lineHeight(sizePx) : static_cast<int16_t>(sizePx);
 }
@@ -255,6 +281,14 @@ int16_t FontChain::kerning(uint32_t left, uint32_t right, uint16_t sizePx,
   RasterFont* b = fontFor(right, styleFlags);
   if (a == nullptr || a != b) return 0;
   return a->kerning(left, right, sizePx, styleFlags);
+}
+
+int32_t FontChain::kerning26_6(uint32_t left, uint32_t right, uint16_t sizePx,
+                               uint8_t styleFlags) {
+  RasterFont* a = fontFor(left, styleFlags);
+  RasterFont* b = fontFor(right, styleFlags);
+  if (a == nullptr || a != b) return 0;
+  return a->kerning26_6(left, right, sizePx, styleFlags);
 }
 
 }  // namespace font

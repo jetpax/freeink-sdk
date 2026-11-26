@@ -3,6 +3,7 @@
 // block flow, style runs, page assembly, and — critically — the O(page)
 // memory invariant are all verified with no device or font files.
 
+#include <Pen.h>
 #include <BookProfile.h>
 #include <FreeInkBook.h>
 #include <cache/PageCache.h>
@@ -1402,6 +1403,90 @@ void testPlainText() {
   CHECK_EQ(scratch.used(), 0u);
 }
 
+// A font whose advances fall between whole pixels: FakeFont's, plus 13/64 of a pixel. Placed by
+// whole pixels, every letter lost that fifth of a pixel and a word came out short ("dil igence"
+// on a panel); placed by 64ths (Pen.h), the letters keep their true places, and layout spaces
+// the words by the same measure, so what it measured is what is drawn.
+class FineFont : public FakeFont {
+ public:
+  static constexpr int32_t kExtra = 13;
+  int32_t advance26_6(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags) override {
+    return static_cast<int32_t>(advance(codepoint, sizePx, styleFlags)) * 64 + kExtra;
+  }
+};
+
+void testFineAdvances() {
+  // The pen: at 8 + 13/64 px a letter, the fifth letter is at 32.8 px, so at 33, not 32
+  FineFont fine;
+  freeink::font::Pen pen(0);
+  int32_t at[6];
+  uint32_t prev = 0;
+  for (int k = 0; k < 6; ++k) {
+    at[k] = pen.place(fine, prev, 'a', 16);
+    pen.pass(fine, 'a', 16);
+    prev = 'a';
+  }
+  CHECK_EQ(at[1], 8);
+  CHECK_EQ(at[4], 33);
+  CHECK_EQ(pen.x(), 49);            // 6 x 525 / 64 = 49.2
+  FakeFont whole;
+  freeink::font::Pen wpen(0);
+  for (int k = 0; k < 6; ++k) wpen.pass(whole, 'a', 16);
+  CHECK_EQ(wpen.x(), 48);           // a whole-pixel font is placed as it always was
+
+  // Layout: lines of four-letter words, each word and its space 5 x (8 + 13/64) = 41.02 px, on a
+  // line of 818 - 2 x 24 = 770 px. A line breaks where the space after its last word no longer
+  // fits: measured in 64ths, 18 words do (19 and the space are 95 x 525 / 64 = 779.3 px); measured
+  // in whole pixels, as before, 19 did (19 x 40 = 760 px), and were drawn 771 px long, past the
+  // margin. A whole-pixel font still fits its 19.
+  char path[1024];
+  std::snprintf(path, sizeof(path), "%s/fine.txt", fixturesDir);
+  FILE* f = std::fopen(path, "wb");
+  CHECK(f != nullptr);
+  for (int k = 0; k < 400; ++k) std::fputs("dili ", f);
+  std::fclose(f);
+  struct Runs : PageSink {
+    Runs(const LayoutParams& p, BookFont& font) : params(p), font(font) {}
+    bool onPage(const Page& page) override {
+      for (uint16_t r = 0; r < page.runCount; ++r) {
+        const PageTextRun& run = page.runs[r];
+        if (pages == 0 && run.baselineY == page.runs[0].baselineY) firstLine += run.len;
+        // Drawn as PageRenderer draws it, it stays inside the margins
+        freeink::font::Pen p(run.x);
+        uint32_t i = 0, prev = 0;
+        while (i < run.len) {
+          const uint32_t cp = static_cast<uint8_t>(run.text[i++]);
+          p.place(font, prev, cp, run.sizePx, run.styleFlags);
+          p.pass(font, cp, run.sizePx, run.styleFlags);
+          prev = cp;
+        }
+        if (p.x() > params.pageWidth - params.marginRight) ++outside;
+      }
+      ++pages;
+      return true;
+    }
+    const LayoutParams& params;
+    BookFont& font;
+    uint32_t firstLine = 0;
+    uint32_t pages = 0;
+    int outside = 0;
+  };
+  for (int whichFont = 0; whichFont < 2; ++whichFont) {
+    BookFont& font = whichFont == 0 ? static_cast<BookFont&>(fine) : static_cast<BookFont&>(whole);
+    HostFileSource source;
+    CHECK(source.open(path));
+    LayoutParams params = stickyParams(font);
+    params.pageWidth = 818;
+    Runs sink(params, font);
+    Arena scratch(scratchBuf, sizeof(scratchBuf));
+    uint32_t pages = 0, chars = 0;
+    CHECK_EQ(static_cast<int>(ChapterLayout::layoutPlainText(source, params, scratch, sink, &pages, &chars)),
+             static_cast<int>(BookStatus::Ok));
+    CHECK_EQ(sink.outside, 0);
+    CHECK_EQ(static_cast<int>(sink.firstLine), (whichFont == 0 ? 18 * 5 - 1 : 19 * 5 - 1));
+  }
+}
+
 // Progressive JPEG (SOF2): TJpgDec cannot decode it, so the renderer's
 // DC-only path decodes the first scan (block averages = a correct 1/8-scale
 // image) and bilinear-resamples to the placement box. Coarse, never blank.
@@ -1959,6 +2044,7 @@ int main(int argc, char** argv) {
   testImagePrescanMemory();
   testCjk();
   testPlainText();
+  testFineAdvances();
   testBidi();
   testArabicShaping();
   testKoreanSpacing();

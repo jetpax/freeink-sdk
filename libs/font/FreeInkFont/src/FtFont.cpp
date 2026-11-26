@@ -746,6 +746,16 @@ int16_t FtFont::kerning(const uint32_t left, const uint32_t right, const uint16_
   return int16_t(std::clamp<int32_t>((value + 32) >> 6, INT16_MIN, INT16_MAX));
 }
 
+int32_t FtFont::advance26_6(const uint32_t codepoint, const uint16_t sizePx, uint8_t) {
+  GlyphMetrics metrics;
+  return metrics26_6(codepoint, uint32_t(sizePx) * 64u, metrics) ? metrics.advance26_6 : 0;
+}
+
+int32_t FtFont::kerning26_6(const uint32_t left, const uint32_t right, const uint16_t sizePx, uint8_t) {
+  if (!ready_) return 0;
+  return kerningGlyphs26_6(glyphId(left), glyphId(right), uint32_t(sizePx) * 64u);
+}
+
 void FtFont::ensureGsubLoaded() {
   // Only remember a real attempt: setting the flag before `ready_` is
   // confirmed would permanently skip loading if this got called too early

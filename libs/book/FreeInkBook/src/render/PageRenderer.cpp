@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#include <Pen.h>
+
 #include "render/ImageRenderer.h"
 
 namespace freeink {
@@ -167,12 +169,14 @@ uint32_t PageRenderer::renderText(const Page& page, FontChain& fonts, const Fram
   uint32_t missing = 0;
   for (uint16_t r = 0; r < page.runCount; ++r) {
     const PageTextRun& run = page.runs[r];
-    int32_t penX = run.x;
+    // Placed as layout measured them: the pen in 64ths of a pixel, each letter at the whole
+    // pixel nearest it (Pen.h)
+    font::Pen pen(run.x);
     uint32_t i = 0;
     uint32_t prev = 0;
     while (i < run.len) {
       const uint32_t cp = decodeUtf8(run.text, run.len, i);
-      if (prev != 0) penX += fonts.kerning(prev, cp, run.sizePx, run.styleFlags);
+      const int32_t penX = pen.place(fonts, prev, cp, run.sizePx, run.styleFlags);
       uint8_t faceFlags = 0;
       RenderFont* font = fonts.fontFor(cp, run.styleFlags, &faceFlags);
       const GlyphBitmap* glyph = font != nullptr ? font->rasterize(cp, run.sizePx) : nullptr;
@@ -194,9 +198,10 @@ uint32_t PageRenderer::renderText(const Page& page, FontChain& fonts, const Fram
           }
         }
       }
-      penX += fonts.advance(cp, run.sizePx, run.styleFlags);
+      pen.pass(fonts, cp, run.sizePx, run.styleFlags);
       prev = cp;
     }
+    const int32_t penX = pen.x();
     if (run.styleFlags & StyleUnderline) {
       const int32_t y = run.baselineY + (run.sizePx >= 24 ? 3 : 2);
       const int32_t thickness = run.sizePx >= 28 ? 2 : 1;
