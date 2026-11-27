@@ -21,6 +21,13 @@ the first FreeType-backed operation.
   kept in 64ths, each letter at the whole pixel nearest it, so rounding doesn't
   add up along a word. The book's layout measures, and `PageRenderer` draws, by
   the same values; a host drawing UI text should place it with a `Pen` too.
+- **`freeink::font::drawText`** (`DrawText.h`) — the one way a line of text is
+  drawn: placed by a `Pen`, each glyph from the face the caller picks, laid by
+  the caller. `PageRenderer` draws a page's runs with it; a host's canvas should
+  draw its lines with it.
+- **`freeink::font::blitGlyph`** (`GlyphBlit.h`) — lays a glyph on a byte-a-pixel
+  frame (`GrayFrame`, turned to the page), clipped once and walked in the order
+  the frame lies in memory, with the caller's blend.
 - **`freeink::font::RasterFont : Font`** — adds `hasGlyph()` and
   `rasterize(codepoint, sizePx) → const GlyphBitmap*` (8-bit coverage +
   bearings + advance).

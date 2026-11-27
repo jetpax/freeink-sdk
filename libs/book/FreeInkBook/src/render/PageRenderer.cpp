@@ -4,7 +4,7 @@
 
 #include <string.h>
 
-#include <Pen.h>
+#include <DrawText.h>
 
 #include "render/ImageRenderer.h"
 
@@ -96,29 +96,6 @@ inline void inkPixel(const FrameTarget& t, int32_t x, int32_t y, uint8_t coverag
   }
 }
 
-uint32_t decodeUtf8(const char* text, uint32_t len, uint32_t& i) {
-  const uint8_t b0 = static_cast<uint8_t>(text[i]);
-  uint32_t cp = b0;
-  uint32_t extra = 0;
-  if (b0 >= 0xF0) {
-    cp = b0 & 0x07;
-    extra = 3;
-  } else if (b0 >= 0xE0) {
-    cp = b0 & 0x0F;
-    extra = 2;
-  } else if (b0 >= 0xC0) {
-    cp = b0 & 0x1F;
-    extra = 1;
-  }
-  ++i;
-  while (extra > 0 && i < len && (static_cast<uint8_t>(text[i]) & 0xC0) == 0x80) {
-    cp = (cp << 6) | (static_cast<uint8_t>(text[i]) & 0x3F);
-    ++i;
-    --extra;
-  }
-  return cp;
-}
-
 // Blits decoded rows into the frame. Mono targets get Floyd–Steinberg error
 // diffusion (rows arrive strictly top-to-bottom, so the error rows carry
 // between callbacks) — tonal grays render as smooth stipple instead of the
@@ -164,44 +141,62 @@ struct ImageBlit {
 
 }  // namespace
 
+// The frame as the upright page sees it, for a Gray8 target
+static font::GrayFrame grayFrame(const FrameTarget& t) {
+  uint8_t turn = font::GrayFrame::kNone;
+  switch (t.rotation) {
+    case FrameRotation::Portrait: turn = font::GrayFrame::kPortrait; break;
+    case FrameRotation::PortraitInverted: turn = font::GrayFrame::kPortraitInverted; break;
+    case FrameRotation::UpsideDown: turn = font::GrayFrame::kUpsideDown; break;
+    case FrameRotation::None: break;
+  }
+  return font::GrayFrame::of(t.framebuffer, t.widthBytes, t.height, turn);
+}
+
 uint32_t PageRenderer::renderText(const Page& page, FontChain& fonts, const FrameTarget& target,
                                   uint32_t* firstMissingOut) {
   uint32_t missing = 0;
+  const bool gray = target.format == FrameFormat::Gray8;
+  const font::GrayFrame frame = gray ? grayFrame(target) : font::GrayFrame();
   for (uint16_t r = 0; r < page.runCount; ++r) {
     const PageTextRun& run = page.runs[r];
-    // Placed as layout measured them: the pen in 64ths of a pixel, each letter at the whole
-    // pixel nearest it (Pen.h)
-    font::Pen pen(run.x);
-    uint32_t i = 0;
-    uint32_t prev = 0;
-    while (i < run.len) {
-      const uint32_t cp = decodeUtf8(run.text, run.len, i);
-      const int32_t penX = pen.place(fonts, prev, cp, run.sizePx, run.styleFlags);
+    // Drawn as layout measured it, by FreeInkFont's drawText: placed by a Pen, from the chain's
+    // face for each letter. Synthetic bold (struck twice, a pixel apart) when the run wants bold
+    // and no bold face is registered; the advance stays the measured one.
+    auto faceFor = [&](uint32_t cp, int* strikes) -> RenderFont* {
       uint8_t faceFlags = 0;
       RenderFont* font = fonts.fontFor(cp, run.styleFlags, &faceFlags);
-      const GlyphBitmap* glyph = font != nullptr ? font->rasterize(cp, run.sizePx) : nullptr;
-      if (glyph == nullptr && cp != ' ' && cp != 0xA0) {
-        if (missing++ == 0 && firstMissingOut != nullptr) *firstMissingOut = cp;
-      }
-      if (glyph != nullptr) {
-        // Synthetic bold (double-strike, +1 px) when the run wants bold but
-        // no bold face is registered; advance stays the measured one.
-        const int strikes =
-            (run.styleFlags & StyleBold) != 0 && (faceFlags & StyleBold) == 0 ? 2 : 1;
-        for (int s = 0; s < strikes; ++s) {
-          for (uint16_t gy = 0; gy < glyph->height; ++gy) {
-            const uint8_t* srcRow = glyph->pixels + static_cast<uint32_t>(gy) * glyph->width;
-            const int32_t dy = run.baselineY + glyph->yoff + gy;
-            for (uint16_t gx = 0; gx < glyph->width; ++gx) {
-              inkPixel(target, penX + glyph->xoff + gx + s, dy, srcRow[gx]);
-            }
-          }
-        }
-      }
-      pen.pass(fonts, cp, run.sizePx, run.styleFlags);
-      prev = cp;
+      *strikes = (run.styleFlags & StyleBold) != 0 && (faceFlags & StyleBold) == 0 ? 2 : 1;
+      return font;
+    };
+    auto missed = [&](uint32_t cp) {
+      if (missing++ == 0 && firstMissingOut != nullptr) *firstMissingOut = cp;
+    };
+    int32_t penX;
+    if (gray) {
+      // Ink darkens: the darker of what is there and the new (overlaps compose)
+      auto ink = [](uint8_t* p, uint8_t coverage) {
+        const uint8_t lum = static_cast<uint8_t>(255 - coverage);
+        if (lum < *p) *p = lum;
+      };
+      penX = font::drawText(fonts, run.x, run.baselineY, run.text, run.len, run.sizePx, run.styleFlags, faceFor,
+                            [&](const GlyphBitmap& g, int32_t left, int32_t top) {
+                              font::blitGlyph(frame, left, top, g, ink);
+                            },
+                            missed);
+    } else {
+      // A bit a pixel: each pixel cut or dithered as it is inked
+      penX = font::drawText(fonts, run.x, run.baselineY, run.text, run.len, run.sizePx, run.styleFlags, faceFor,
+                            [&](const GlyphBitmap& g, int32_t left, int32_t top) {
+                              for (uint16_t gy = 0; gy < g.height; ++gy) {
+                                const uint8_t* row = g.pixels + static_cast<uint32_t>(gy) * g.width;
+                                for (uint16_t gx = 0; gx < g.width; ++gx) {
+                                  inkPixel(target, left + gx, top + gy, row[gx]);
+                                }
+                              }
+                            },
+                            missed);
     }
-    const int32_t penX = pen.x();
     if (run.styleFlags & StyleUnderline) {
       const int32_t y = run.baselineY + (run.sizePx >= 24 ? 3 : 2);
       const int32_t thickness = run.sizePx >= 28 ? 2 : 1;
