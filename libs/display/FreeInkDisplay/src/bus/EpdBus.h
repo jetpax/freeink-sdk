@@ -142,6 +142,12 @@ class EpdBus {
   ~EpdBus();
   void begin(const EpdPins& pins, uint32_t spiHz, BusyPolarity busy, int8_t spiMiso = -1, int8_t coCs = -1);
 
+  // Change the SPI clock after begin(); no transfer may be under way.
+  void setSpiHz(uint32_t spiHz) {
+    _spiHz = spiHz;
+    _spi = SPISettings(spiHz, MSBFIRST, SPI_MODE0);
+  }
+
   // Hardware reset pulse; extraSettleMs adds a post-reset settle (X3 needs 50 ms).
   void reset(uint16_t extraSettleMs = 0);
 

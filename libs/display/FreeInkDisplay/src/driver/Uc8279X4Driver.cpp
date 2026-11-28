@@ -298,6 +298,7 @@ void Uc8279X4Driver::begin(EpdBus& bus) {
   _oldPlaneValid = false;
   _needFullClear = true;
   _redriveAfterGray = false;
+  _redriveStart = false;
   bus.reset(50);
   initController(bus);
   // Framebuffer-sized scratch for the grayscale absolute-plane fold (SPIRAM;
@@ -389,6 +390,49 @@ void Uc8279X4Driver::streamPlaneXor(EpdBus& bus, uint8_t ramCmd, const uint8_t* 
   for (uint16_t y = _cfg.gateOffset + _h; y < _tresH; y++) txn.writeBytes(row, wb);
 }
 
+// The PTL (0x90) descriptor: the displayWindow() rectangle while one is active,
+// else the whole visible panel. Gate coords carry the 120-gate visible offset.
+void Uc8279X4Driver::sendPartialWindow(EpdBus& bus) {
+  const uint16_t xStart = _winActive ? _winX : 0;
+  const uint16_t xEnd = _winActive ? static_cast<uint16_t>(_winX + _winW - 1) : static_cast<uint16_t>(_w - 1);
+  const uint16_t yTop = _winActive ? _winY : 0;
+  const uint16_t yBot = _winActive ? static_cast<uint16_t>(_winY + _winH - 1) : static_cast<uint16_t>(_h - 1);
+  const uint16_t yStart = static_cast<uint16_t>(_cfg.gateOffset + yTop);
+  const uint16_t yEnd = static_cast<uint16_t>(_cfg.gateOffset + yBot);
+  bus.cmd(CMD_PARTIAL_WINDOW);
+  bus.data(static_cast<uint8_t>(xStart >> 8));
+  bus.data(static_cast<uint8_t>(xStart & 0xF8));  // x start, byte-aligned
+  bus.data(static_cast<uint8_t>(xEnd >> 8));
+  bus.data(static_cast<uint8_t>(xEnd | 0x07));
+  bus.data(static_cast<uint8_t>(yStart >> 8));
+  bus.data(static_cast<uint8_t>(yStart & 0xFF));
+  bus.data(static_cast<uint8_t>(yEnd >> 8));
+  bus.data(static_cast<uint8_t>(yEnd & 0xFF));
+  bus.data(0x01);
+}
+
+// The displayWindow() rectangle of `fb` into a RAM plane, its rows back to
+// back: the controller must be in partial mode with that PTL set, so the RAM
+// takes them as the window. Stock orientation only (displayStart checks).
+void Uc8279X4Driver::streamWindow(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, bool invert) {
+  uint8_t buf[1024];
+  uint16_t used = 0;
+  const uint16_t byte0 = static_cast<uint16_t>(_winX >> 3);
+  const uint16_t bytes = static_cast<uint16_t>(_winW >> 3);
+  bus.cmd(ramCmd);
+  auto txn = bus.beginTxn();
+  for (uint16_t r = _winY; r < _winY + _winH; ++r) {
+    if (used + bytes > sizeof(buf)) {
+      txn.writeBytes(buf, used);
+      used = 0;
+    }
+    const uint8_t* src = fb + static_cast<uint32_t>(r) * _wb + byte0;
+    for (uint16_t i = 0; i < bytes; ++i) buf[used + i] = invert ? static_cast<uint8_t>(~src[i]) : src[i];
+    used = static_cast<uint16_t>(used + bytes);
+  }
+  if (used) txn.writeBytes(buf, used);
+}
+
 void Uc8279X4Driver::powerOnIfNeeded(EpdBus& bus, const char* tag) {
   if (_isScreenOn) return;  // vendor _powerOn(): no second PON while powered
   bus.cmd(CMD_POWER_ON);
@@ -426,7 +470,12 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   // Half is CrossPoint's periodic ghost-cleanup (every getRefreshFrequency()
   // pages) AND the manual force-refresh; it MUST scrub, exactly like UC8179.
   const bool scrub = (mode == RefreshMode::Half);
-  const bool fast = (mode == RefreshMode::Fast) && !_needFullClear && _oldPlaneValid;
+  // After skipInitialResync() the first Fast runs with no valid OLD plane (the
+  // controller was reset; the glass shows whatever it last showed): it re-drives
+  // every pixel to its target with DU (OLD = ~target, below) instead of a flash.
+  const bool startRedrive = (mode == RefreshMode::Fast) && _redriveStart && !_needFullClear;
+  const bool fast = (mode == RefreshMode::Fast) && !_needFullClear && (_oldPlaneValid || startRedrive);
+  _redriveStart = false;
 
   if (paintDestination) {
     streamPlane(bus, CMD_DTM1, fb, true);
@@ -434,6 +483,26 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
     startBwRefresh(bus, true);
     bus.waitRefreshComplete(" 8279x4_BW_TARGET_DRF");
     bus.cmd(CMD_PARTIAL_OUT);
+  }
+
+  // A window's planes go out as the window alone: in partial mode the RAM takes
+  // only the PTL rectangle, so a key's refresh sends a few hundred bytes, not
+  // two 60 KB planes (48 ms each at the X4 Pro's 10 MHz). Its pixels are all
+  // re-driven (OLD = ~target), as below. Outside it both planes keep what the
+  // glass shows there, so the next whole-panel Fast still diffs truly.
+  _pendingWindowPlanes = _winActive && fast && !startRedrive && !paintDestination && !FREEINK_UC8279X4_ROWREV &&
+                         !FREEINK_UC8279X4_XMIRROR;
+  if (_pendingWindowPlanes) {
+    bus.cmd(CMD_PARTIAL_IN);
+    sendPartialWindow(bus);
+    streamWindow(bus, CMD_DTM2, fb, false);
+    streamWindow(bus, CMD_DTM1, fb, /*invert=*/true);
+    bus.cmd(CMD_PARTIAL_OUT);
+    startBwRefresh(bus, true);
+    _pendingPartial = true;
+    _pendingTurnOff = turnOff;
+    _pendingRefresh = true;
+    return true;
   }
 
   streamPlane(bus, CMD_DTM2, fb);
@@ -446,14 +515,18 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
       // the absolute GC-from-white waveform.
       bus.fillPlane(CMD_DTM1, 0xFF, _tresH, _wb);
     }
-  } else if (_redriveAfterGray) {
+  } else if (_redriveAfterGray || _winActive || startRedrive) {
     // Re-drive every pixel once after grayscale so the B/W transition scrubs
     // residual edge charge before restoring the ordinary differential baseline.
+    // A window always re-drives its own pixels: what is under it may be gray
+    // residue the OLD plane can't describe, and DU moves each pixel only toward
+    // its target, so this cleans the window without a flash.
     streamPlane(bus, CMD_DTM1, fb, /*invert=*/true);
   }
   // Consumed: the white-seed (!fast) or the re-drive above already scrubbed any
-  // post-AA gray residue for this frame.
-  _redriveAfterGray = false;
+  // post-AA gray residue for this frame. A window scrubbed only itself, so the
+  // rest of the panel still needs its re-drive on the next whole-panel Fast.
+  if (!_winActive) _redriveAfterGray = false;
 
   startBwRefresh(bus, fast);
   _pendingPartial = fast;
@@ -481,6 +554,7 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
     bus.data(_cfg.gateScan);  // 0xE1 <- 0x02
   }
 
+  if (!_isScreenOn) _fastPllLive = false;  // PON below puts the panel's own back
   powerOnIfNeeded(bus, " 8279x4_PON");
 
   if (fast) {
@@ -489,30 +563,17 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
     // Gate coords carry the 120-gate visible offset, so framebuffer row y is
     // panel gate line (gateOffset + y). Whole panel unless displayWindow() set
     // a region for this refresh.
-    const uint16_t xStart = _winActive ? static_cast<uint16_t>(_winX) : 0;
-    const uint16_t xEnd = _winActive ? static_cast<uint16_t>(_winX + _winW - 1) : static_cast<uint16_t>(_w - 1);
-    const uint16_t yTop = _winActive ? _winY : 0;
-    const uint16_t yBot = _winActive ? static_cast<uint16_t>(_winY + _winH - 1) : static_cast<uint16_t>(_h - 1);
-    const uint16_t yStart = static_cast<uint16_t>(_cfg.gateOffset + yTop);
-    const uint16_t yEnd = static_cast<uint16_t>(_cfg.gateOffset + yBot);
     bus.cmd(CMD_PARTIAL_IN);
-    bus.cmd(CMD_PARTIAL_WINDOW);
-    bus.data(static_cast<uint8_t>(xStart >> 8));
-    bus.data(static_cast<uint8_t>(xStart & 0xF8));  // x start, byte-aligned
-    bus.data(static_cast<uint8_t>(xEnd >> 8));
-    bus.data(static_cast<uint8_t>(xEnd | 0x07));
-    bus.data(static_cast<uint8_t>(yStart >> 8));
-    bus.data(static_cast<uint8_t>(yStart & 0xFF));
-    bus.data(static_cast<uint8_t>(yEnd >> 8));
-    bus.data(static_cast<uint8_t>(yEnd & 0xFF));
-    bus.data(0x01);
+    sendPartialWindow(bus);
   }
   if (fast && _customLut != nullptr) {
     // A caller's waveform (setCustomLut): REG set, so the panel runs the five
     // tables uploaded here in place of its own. PON reloaded the panel's
-    // settings, so these go in after it, as for the AA path.
+    // settings, so these go in after it, as for the AA path. The frame rate
+    // is the caller's if it set one (setFastPll), for these tables only.
     bus.cmd(CMD_PLL);
-    bus.data(_cfg.pll);
+    bus.data(_fastPll ? _fastPll : _cfg.pll);
+    _fastPllLive = _fastPll != 0 && _fastPll != _cfg.pll;
     bus.cmd(CMD_PANEL_SETTING);
     bus.data(_cfg.psr0);  // REG=1 -> external LUT
     bus.data(_cfg.psr1);
@@ -521,6 +582,14 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
       for (uint8_t i = 0; i < 42; i++) bus.data(_customLut[t * 42 + i]);
     }
   } else {
+    // The panel still powered from a quick frame at the caller's frame rate:
+    // the rate the quick frames had before setFastPll, as every other refresh
+    // got then.
+    if (_fastPllLive) {
+      bus.cmd(CMD_PLL);
+      bus.data(_cfg.pll);
+      _fastPllLive = false;
+    }
     bus.cmd(CMD_PANEL_SETTING);
     bus.data(static_cast<uint8_t>(_cfg.psr0 & 0xDF));  // REG cleared -> OTP (0x13)
     bus.data(_cfg.psr1);
@@ -537,9 +606,9 @@ void Uc8279X4Driver::startBwRefresh(EpdBus& bus, bool fast) {
 
 // Refresh a single rectangle instead of the whole panel.
 //
-// The heavy cost on this glass is the DRF waveform, which scans gate lines; the
-// two full-plane SPI uploads (DTM2 before, DTM1 after) are unchanged and remain
-// the fixed floor. Narrowing the PTL window narrows the scan.
+// The heavy cost on this glass is the DRF waveform, which scans gate lines.
+// Narrowing the PTL window narrows the scan, and the planes go out as the
+// window alone (displayStart / displayFinish), not as two full 60 KB uploads.
 //
 // Any condition that would make a differential DU invalid falls back to the
 // ordinary whole-panel Fast path rather than producing a wrong image.
@@ -547,8 +616,9 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
                                    uint16_t w, uint16_t h, bool turnOff) {
   const bool alignable = (x % 8 == 0) && (w % 8 == 0);
   const bool inBounds = w > 0 && h > 0 && (uint32_t)x + w <= _w && (uint32_t)y + h <= _h;
-  // The first Fast after a gray pass needs display()'s whole-panel re-drive.
-  const bool diffValid = _oldPlaneValid && !_needFullClear && !_redriveAfterGray;
+  // A window re-drives its own pixels (displayStart), so gray residue under it
+  // is no reason to fall back to the whole panel.
+  const bool diffValid = _oldPlaneValid && !_needFullClear;
   if (!fb || !alignable || !inBounds || !diffValid) {
     display(bus, fb, prev, RefreshMode::Fast, turnOff);
     return;
@@ -559,9 +629,10 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
   _winY = y;
   _winW = w;
   _winH = h;
-  // displayStart() builds the PTL from the window; displayFinish() rides out the
-  // waveform, issues PTOUT and re-syncs the OLD plane from the full framebuffer,
-  // so the next partial still diffs against a complete baseline.
+  // displayStart() sends the window's planes and builds the PTL from it;
+  // displayFinish() rides out the waveform, writes the window's pixels into the
+  // OLD plane and issues PTOUT. The OLD plane outside the window is left as the
+  // glass is there, so the next partial still diffs against a true baseline.
   const bool deferred = displayStart(bus, fb, prev, RefreshMode::Fast, turnOff);
   if (deferred) displayFinish(bus, fb);
   _winActive = false;
@@ -572,11 +643,19 @@ void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   _pendingRefresh = false;
 
   bus.waitRefreshComplete(" 8279x4_DRF");
-  if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);
-
-  // Sync the OLD plane (0x10) with the just-displayed frame so the NEXT partial
-  // diffs against it (same ghosting management as the UC8179 sibling).
-  streamPlane(bus, CMD_DTM1, fb);
+  if (_pendingWindowPlanes) {
+    // Still in partial mode: the OLD plane takes the window's new pixels alone;
+    // the rest of it already holds what the glass shows outside the window.
+    _pendingWindowPlanes = false;
+    sendPartialWindow(bus);
+    streamWindow(bus, CMD_DTM1, fb, false);
+    bus.cmd(CMD_PARTIAL_OUT);
+  } else {
+    if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);
+    // Sync the OLD plane (0x10) with the just-displayed frame so the NEXT partial
+    // diffs against it (same ghosting management as the UC8179 sibling).
+    streamPlane(bus, CMD_DTM1, fb);
+  }
   _oldPlaneValid = true;
   _needFullClear = false;
 
@@ -594,9 +673,16 @@ void Uc8279X4Driver::requestResync(uint8_t settlePasses) {
   _directGrayPass = false;
   (void)settlePasses;
   _needFullClear = true;
+  _redriveStart = false;
 }
 
-void Uc8279X4Driver::skipInitialResync() { _needFullClear = false; }
+// The first paint after begin() without the full flash: a quick start (an
+// e-reader's page as it wakes). The OLD plane is unknown, so that first Fast
+// re-drives every pixel (displayStart) rather than diffing against it.
+void Uc8279X4Driver::skipInitialResync() {
+  _needFullClear = false;
+  _redriveStart = !_oldPlaneValid;
+}
 
 void Uc8279X4Driver::deepSleep(EpdBus& bus) {
   _textAa.invalidate();

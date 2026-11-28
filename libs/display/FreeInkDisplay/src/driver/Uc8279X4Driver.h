@@ -82,6 +82,10 @@ class Uc8279X4Driver : public PanelDriver {
     (void)bus;
     _customLut = enabled ? data : nullptr;
   }
+  // The PLL (0x30) frame rate those tables run at; 0 is the config's (0x0E,
+  // about 12 ms a frame). Ink-boy runs 0x0F on this panel for its games. Other
+  // refreshes keep the config's.
+  void setFastPll(uint8_t pll) override { _fastPll = pll; }
   void begin(EpdBus& bus) override;
   void deepSleep(EpdBus& bus) override;
 
@@ -187,6 +191,9 @@ class Uc8279X4Driver : public PanelDriver {
   // by the next B/W displayStart to RE-DRIVE every pixel to its target (DTM1 =
   // ~newframe), scrubbing the residue with a cheap DU (no GC flash).
   bool _redriveAfterGray = false;
+  // skipInitialResync() with no valid OLD plane: the next Fast re-drives every
+  // pixel instead of diffing (displayStart).
+  bool _redriveStart = false;
   // Async split state (see Uc8179Driver for the contract).
   bool _pendingRefresh = false;
   bool _pendingTurnOff = false;
@@ -195,6 +202,14 @@ class Uc8279X4Driver : public PanelDriver {
   // displayStart() when it builds the PTL (0x90) descriptor.
   bool _winActive = false;
   uint16_t _winX = 0, _winY = 0, _winW = 0, _winH = 0;
+  // The refresh under way sent the window's planes alone (displayStart), so
+  // displayFinish syncs only the window's part of the OLD plane.
+  bool _pendingWindowPlanes = false;
+  void sendPartialWindow(EpdBus& bus);
+  void streamWindow(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, bool invert);
+  // setFastPll's frame rate, and whether the panel, still powered, runs at it.
+  uint8_t _fastPll = 0;
+  bool _fastPllLive = false;
 };
 
 PanelDriver& uc8279X4Driver();

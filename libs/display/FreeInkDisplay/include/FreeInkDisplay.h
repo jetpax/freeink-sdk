@@ -317,6 +317,11 @@ class FreeInkDisplay {
 
   // LUT control
   void setCustomLUT(bool enabled, const unsigned char* lutData = nullptr);
+  // The frame rate (PLL byte) a custom LUT's Fast refresh runs at; 0 = the driver's.
+  void setFastPll(uint8_t pll);
+  // The display SPI clock from now on; 0 = the driver's (10 MHz on Xteink boards).
+  // Not while a refresh is being sent.
+  void setDisplaySpiHz(uint32_t hz);
 
   // Power management
   void deepSleep();

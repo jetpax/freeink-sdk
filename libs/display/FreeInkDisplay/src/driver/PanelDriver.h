@@ -311,6 +311,9 @@ class PanelDriver {
     (void)enabled;
     (void)data;
   }
+  // The frame rate (PLL) a custom LUT's Fast refresh runs at; 0 = the driver's.
+  // Only drivers with a host-waveform Fast path use it.
+  virtual void setFastPll(uint8_t pll) { (void)pll; }
 };
 
 }  // namespace freeink

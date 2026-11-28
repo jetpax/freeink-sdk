@@ -1270,6 +1270,14 @@ void FreeInkDisplay::setCustomLUT(bool enabled, const unsigned char* lutData) {
   _driver->setCustomLut(_bus, enabled, lutData);
 }
 
+void FreeInkDisplay::setFastPll(uint8_t pll) {
+  if (_driver) _driver->setFastPll(pll);
+}
+
+void FreeInkDisplay::setDisplaySpiHz(uint32_t hz) {
+  if (_driver) _bus.setSpiHz(hz ? hz : _driver->spiHz());
+}
+
 void FreeInkDisplay::deepSleep() {
   cancelGrayscalePass();
   DisplayPmLock pmLock;
