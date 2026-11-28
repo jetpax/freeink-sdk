@@ -487,16 +487,20 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
 
   // A window's planes go out as the window alone: in partial mode the RAM takes
   // only the PTL rectangle, so a key's refresh sends a few hundred bytes, not
-  // two 60 KB planes (48 ms each at the X4 Pro's 10 MHz). Its pixels are all
-  // re-driven (OLD = ~target), as below. Outside it both planes keep what the
-  // glass shows there, so the next whole-panel Fast still diffs truly.
+  // two 60 KB planes (48 ms each at the X4 Pro's 10 MHz). Outside it both planes
+  // keep what the glass shows there, so the next whole-panel Fast still diffs
+  // truly. Inside, it diffs against the OLD plane, which already holds what the
+  // glass shows there, so only pixels that change are driven. Only after a grey
+  // pass are all its pixels re-driven (OLD = ~target), since grey residue may be
+  // under it: re-driving every frame drove unchanged pixels again and again,
+  // which built up charge (2048 ghosted badly over a long game).
   _pendingWindowPlanes = _winActive && fast && !startRedrive && !paintDestination && !FREEINK_UC8279X4_ROWREV &&
                          !FREEINK_UC8279X4_XMIRROR;
   if (_pendingWindowPlanes) {
     bus.cmd(CMD_PARTIAL_IN);
     sendPartialWindow(bus);
     streamWindow(bus, CMD_DTM2, fb, false);
-    streamWindow(bus, CMD_DTM1, fb, /*invert=*/true);
+    if (_redriveAfterGray) streamWindow(bus, CMD_DTM1, fb, /*invert=*/true);
     bus.cmd(CMD_PARTIAL_OUT);
     startBwRefresh(bus, true);
     _pendingPartial = true;
@@ -515,12 +519,11 @@ bool Uc8279X4Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
       // the absolute GC-from-white waveform.
       bus.fillPlane(CMD_DTM1, 0xFF, _tresH, _wb);
     }
-  } else if (_redriveAfterGray || _winActive || startRedrive) {
+  } else if (_redriveAfterGray || startRedrive) {
     // Re-drive every pixel once after grayscale so the B/W transition scrubs
     // residual edge charge before restoring the ordinary differential baseline.
-    // A window always re-drives its own pixels: what is under it may be gray
-    // residue the OLD plane can't describe, and DU moves each pixel only toward
-    // its target, so this cleans the window without a flash.
+    // A window sent in full planes (a mirrored build) does the same only then,
+    // as one sent alone does above.
     streamPlane(bus, CMD_DTM1, fb, /*invert=*/true);
   }
   // Consumed: the white-seed (!fast) or the re-drive above already scrubbed any
@@ -616,8 +619,8 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
                                    uint16_t w, uint16_t h, bool turnOff) {
   const bool alignable = (x % 8 == 0) && (w % 8 == 0);
   const bool inBounds = w > 0 && h > 0 && (uint32_t)x + w <= _w && (uint32_t)y + h <= _h;
-  // A window re-drives its own pixels (displayStart), so gray residue under it
-  // is no reason to fall back to the whole panel.
+  // A window after a grey pass re-drives its own pixels (displayStart), so gray
+  // residue under it is no reason to fall back to the whole panel.
   const bool diffValid = _oldPlaneValid && !_needFullClear;
   if (!fb || !alignable || !inBounds || !diffValid) {
     display(bus, fb, prev, RefreshMode::Fast, turnOff);
